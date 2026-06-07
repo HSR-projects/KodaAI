@@ -1,0 +1,43 @@
+# Dependencies
+/node_modules
+
+# Build outputs
+/.next
+/out
+/build
+
+# Environment variables — NEVER commit real keys
+.env
+.env.*
+!.env.example
+
+# Data directory (local runtime data)
+/data
+
+# Secrets / certs
+*.pem
+*.key
+*.p12
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Tooling
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+Thumbs.db
+
+# Archives
+*.tar.gz
+*.zip
+
+# Backup / copy files (local scratch)
+*\ copy.*
+*\ copy
+
+# Claude Code local context
+.claude

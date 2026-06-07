@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Geist if available (via `geist` pkg or system), with graceful fallbacks. */
+  --font-geist-sans: "Geist", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-geist-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo,
+    Monaco, Consolas, monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-koda-bg text-koda-text antialiased;
+    font-family: var(--font-geist-sans);
+    /* Never let a stray wide element cause the whole page to scroll sideways. */
+    overflow-x: hidden;
+  }
+  code,
+  pre,
+  kbd {
+    font-family: var(--font-geist-mono);
+  }
+
+  /* Thin, themed scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-koda-border;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-koda-accent-dim;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* react-markdown / prose code blocks */
+.prose pre {
+  margin: 0;
+  background: transparent;
+  padding: 0;
+}
+.prose :where(code):not(:where(pre code)) {
+  @apply rounded bg-koda-surface-2 px-1.5 py-0.5 text-[0.85em] font-medium;
+}
+.prose :where(code):not(:where(pre code))::before,
+.prose :where(code):not(:where(pre code))::after {
+  content: none;
+}
+
+/* Animated gradient glow for the hero */
+.koda-hero-glow {
+  background: radial-gradient(
+    600px circle at 50% 0%,
+    rgba(155, 124, 255, 0.12),
+    transparent 70%
+  );
+}
+
+@layer utilities {
+  /* Keep content clear of the iOS home indicator / notch when
+     `viewport-fit=cover` is active. Falls back to 0 on other devices. */
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+}
+
+/* On touch devices, hover styles "stick" after a tap. Disable hover-reveal
+   transitions there so action rows that are made always-visible don't flicker. */
+@media (hover: none) {
+  .touch-no-hover {
+    opacity: 1 !important;
+  }
+}
