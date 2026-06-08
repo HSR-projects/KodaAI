@@ -14,11 +14,13 @@ import {
   Monitor,
   RefreshCw,
   TerminalSquare,
+  Zap,
 } from "lucide-react";
 import { useKodaStore } from "@/lib/store";
-import { buildPreviewSrcDoc } from "@/lib/computerPreview";
+import { buildPreviewSrcDoc, isReactProject } from "@/lib/computerPreview";
 import { downloadZip } from "@/lib/zip";
 import { cn } from "@/lib/utils";
+import { useWebContainer } from "@/hooks/useWebContainer";
 import type { ComputerStatus, ProjectFile } from "@/types";
 
 type Tab = "preview" | "code" | "terminal";
@@ -42,30 +44,46 @@ export function ComputerArtifact() {
   const [runKey, setRunKey] = useState(0);
   const termRef = useRef<HTMLDivElement>(null);
 
+  // Real Node.js execution via WebContainers (React/Vite projects)
+  const wc = useWebContainer();
+  const isReact = useMemo(() => isReactProject(computer?.files ?? []), [computer?.files]);
+  const wcMountedKey = useRef<string>("");
+
   const files = computer?.files ?? [];
-  const status = computer?.status ?? "building";
   const activePath = computer?.activePath;
   const activeFile = files.find((f) => f.path === activePath) ?? files[0];
 
-  // Auto-jump to the preview once the dev server is "running".
+  // Mount files into WebContainer when the project is ready
+  useEffect(() => {
+    if (!isReact || !files.length) return;
+    if (wc.status === "booting" || wc.status === "installing" || wc.status === "starting") return;
+    const key = files.map((f) => f.path + f.content.length).join("|");
+    if (key === wcMountedKey.current) return;
+    wcMountedKey.current = key;
+    void wc.mount(files, computer?.commands ?? []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files, isReact]);
+
+  // Auto-jump to preview when ready
   const ranRef = useRef(false);
   useEffect(() => {
-    if ((status === "running" || status === "ready") && !ranRef.current && files.length) {
+    const wcReady = isReact && wc.status === "ready";
+    const storeReady = !isReact && (computer?.status === "running" || computer?.status === "ready");
+    if ((wcReady || storeReady) && !ranRef.current && files.length) {
       ranRef.current = true;
       setTab("preview");
     }
-  }, [status, files.length]);
+  }, [wc.status, computer?.status, files.length, isReact]);
 
-  // Keep the terminal scrolled to the latest line.
+  // Keep terminal scrolled to bottom
   useEffect(() => {
     if (tab === "terminal" && termRef.current) {
       termRef.current.scrollTop = termRef.current.scrollHeight;
     }
-  }, [computer?.terminal, tab]);
+  }, [wc.terminal, computer?.terminal, tab]);
 
   const srcDoc = useMemo(
     () => buildPreviewSrcDoc(files),
-    // Rebuild whenever file contents change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [JSON.stringify(files), runKey]
   );
@@ -73,15 +91,25 @@ export function ComputerArtifact() {
   if (!computer) return null;
 
   const openInNewTab = () => {
+    if (isReact && wc.previewUrl) {
+      window.open(wc.previewUrl, "_blank", "noopener");
+      return;
+    }
     const blob = new Blob([srcDoc], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     window.open(url, "_blank", "noopener");
     setTimeout(() => URL.revokeObjectURL(url), 4000);
   };
 
+  const effectiveStatus: ComputerStatus = isReact
+    ? wcStatusToStore(wc.status)
+    : computer.status ?? "building";
+
+  const termLines = isReact ? wc.terminal : computer.terminal;
+
   return (
     <div className="flex h-full flex-col">
-      {/* Toolbar — wraps on narrow / mobile panels. */}
+      {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2 border-b border-koda-border px-3 py-2">
         <div className="flex items-center rounded-lg bg-koda-surface-2 p-0.5">
           <TabBtn active={tab === "preview"} onClick={() => setTab("preview")} icon={<Monitor className="h-3.5 w-3.5" />} label="Preview" />
@@ -89,12 +117,15 @@ export function ComputerArtifact() {
           <TabBtn active={tab === "terminal"} onClick={() => setTab("terminal")} icon={<TerminalSquare className="h-3.5 w-3.5" />} label="Terminal" />
         </div>
 
-        <StatusPill status={status} />
+        <StatusPill status={effectiveStatus} isReal={isReact} />
 
         <div className="ml-auto flex items-center gap-1">
           {tab === "preview" && (
             <>
-              <IconBtn onClick={() => setRunKey((k) => k + 1)} title="Reload preview">
+              <IconBtn
+                onClick={() => { isReact ? wc.reload() : setRunKey((k) => k + 1); }}
+                title="Reload preview"
+              >
                 <RefreshCw className="h-3.5 w-3.5" />
               </IconBtn>
               <IconBtn onClick={openInNewTab} title="Open in new tab">
@@ -116,28 +147,41 @@ export function ComputerArtifact() {
       {/* Body */}
       <div className="relative flex-1 overflow-hidden">
         {tab === "preview" && (
-          <iframe
-            key={runKey}
-            title={`${computer.title} preview`}
-            sandbox="allow-scripts allow-modals allow-popups allow-forms allow-same-origin"
-            className="h-full w-full bg-white"
-            srcDoc={srcDoc}
-          />
+          isReact && wc.previewUrl ? (
+            <iframe
+              key={wc.previewUrl}
+              title={`${computer.title} preview`}
+              src={wc.previewUrl}
+              className="h-full w-full bg-white"
+            />
+          ) : isReact && (wc.status === "installing" || wc.status === "starting" || wc.status === "booting") ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 text-koda-muted">
+              <Loader2 className="h-6 w-6 animate-spin text-koda-accent" />
+              <p className="text-sm">
+                {wc.status === "booting" ? "Booting Linux runtime…" : wc.status === "installing" ? "Running npm install…" : "Starting dev server…"}
+              </p>
+              <p className="text-xs opacity-60">Switch to Terminal to watch progress</p>
+            </div>
+          ) : (
+            <iframe
+              key={runKey}
+              title={`${computer.title} preview`}
+              sandbox="allow-scripts allow-modals allow-popups allow-forms allow-same-origin"
+              className="h-full w-full bg-white"
+              srcDoc={srcDoc}
+            />
+          )
         )}
 
         {tab === "code" && (
           <div className="flex h-full">
-            <FileTree
-              files={files}
-              activePath={activeFile?.path}
-              onSelect={setActive}
-            />
+            <FileTree files={files} activePath={activeFile?.path} onSelect={setActive} />
             <div className="flex min-w-0 flex-1 flex-col">
               {activeFile ? (
                 <CodeView file={activeFile} />
               ) : (
                 <div className="flex h-full items-center justify-center text-sm text-koda-muted">
-                  {status === "building" ? "Generating files…" : "No files yet."}
+                  {effectiveStatus === "building" ? "Generating files…" : "No files yet."}
                 </div>
               )}
             </div>
@@ -149,16 +193,28 @@ export function ComputerArtifact() {
             ref={termRef}
             className="h-full overflow-y-auto bg-[#0c0c0f] p-3 font-mono text-[12.5px] leading-relaxed text-koda-text/90"
           >
-            {computer.terminal.length === 0 ? (
-              <span className="text-koda-muted">Terminal is ready — build steps will appear here.</span>
+            {termLines.length === 0 ? (
+              <span className="text-koda-muted">
+                {isReact
+                  ? wc.status === "booting" ? "Booting WebContainer runtime…" : "Waiting for project files…"
+                  : "Terminal is ready — build steps will appear here."}
+              </span>
             ) : (
-              computer.terminal.map((line, i) => (
-                <div key={i} className={cn("whitespace-pre-wrap", line.includes("$") && "text-koda-accent-soft")}>
-                  {line || " "}
+              termLines.map((line, i) => (
+                <div
+                  key={i}
+                  className={cn(
+                    "whitespace-pre-wrap",
+                    typeof line === "string" && line.includes("$") && "text-koda-accent-soft",
+                    typeof line === "string" && /error|failed|ERR!/i.test(line) && "text-red-400",
+                    typeof line === "string" && /warn/i.test(line) && "text-yellow-400/80",
+                  )}
+                >
+                  {(typeof line === "string" ? line : String(line)) || " "}
                 </div>
               ))
             )}
-            {(status === "installing" || status === "running" || status === "building") && (
+            {(effectiveStatus === "installing" || effectiveStatus === "running" || effectiveStatus === "building") && (
               <div className="mt-1 inline-block h-3.5 w-2 animate-pulse bg-koda-accent align-middle" />
             )}
           </div>
@@ -168,13 +224,19 @@ export function ComputerArtifact() {
   );
 }
 
-// ─── File tree (inspect) ──────────────────────────────────────
-
-interface TreeNode {
-  name: string;
-  path: string;
-  children?: Map<string, TreeNode>;
+function wcStatusToStore(s: string): ComputerStatus {
+  if (s === "idle") return "building";
+  if (s === "booting") return "building";
+  if (s === "installing") return "installing";
+  if (s === "starting") return "running";
+  if (s === "ready") return "ready";
+  if (s === "error") return "error";
+  return "building";
 }
+
+// ─── File tree ────────────────────────────────────────────────
+
+interface TreeNode { name: string; path: string; children?: Map<string, TreeNode>; }
 
 function buildTree(files: ProjectFile[]): TreeNode {
   const root: TreeNode = { name: "", path: "", children: new Map() };
@@ -186,11 +248,7 @@ function buildTree(files: ProjectFile[]): TreeNode {
       if (!node.children) node.children = new Map();
       let child = node.children.get(part);
       if (!child) {
-        child = {
-          name: part,
-          path: parts.slice(0, i + 1).join("/"),
-          children: isFile ? undefined : new Map(),
-        };
+        child = { name: part, path: parts.slice(0, i + 1).join("/"), children: isFile ? undefined : new Map() };
         node.children.set(part, child);
       }
       node = child;
@@ -199,15 +257,7 @@ function buildTree(files: ProjectFile[]): TreeNode {
   return root;
 }
 
-function FileTree({
-  files,
-  activePath,
-  onSelect,
-}: {
-  files: ProjectFile[];
-  activePath?: string;
-  onSelect: (path: string) => void;
-}) {
+function FileTree({ files, activePath, onSelect }: { files: ProjectFile[]; activePath?: string; onSelect: (path: string) => void }) {
   const tree = useMemo(() => buildTree(files), [files]);
   return (
     <div className="w-32 shrink-0 overflow-y-auto border-r border-koda-border bg-koda-surface/40 py-2 sm:w-44 md:w-52">
@@ -221,21 +271,11 @@ function FileTree({
 
 function sortNodes(a: TreeNode, b: TreeNode): number {
   const aDir = !!a.children, bDir = !!b.children;
-  if (aDir !== bDir) return aDir ? -1 : 1; // folders first
+  if (aDir !== bDir) return aDir ? -1 : 1;
   return a.name.localeCompare(b.name);
 }
 
-function TreeRow({
-  node,
-  depth,
-  activePath,
-  onSelect,
-}: {
-  node: TreeNode;
-  depth: number;
-  activePath?: string;
-  onSelect: (path: string) => void;
-}) {
+function TreeRow({ node, depth, activePath, onSelect }: { node: TreeNode; depth: number; activePath?: string; onSelect: (path: string) => void }) {
   const [open, setOpen] = useState(true);
   const isDir = !!node.children;
   const active = node.path === activePath;
@@ -243,9 +283,7 @@ function TreeRow({
   if (isDir) {
     return (
       <>
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
+        <button type="button" onClick={() => setOpen((o) => !o)}
           className="flex w-full items-center gap-1 px-2 py-1 text-left text-[13px] text-koda-text/80 hover:bg-koda-surface-2"
           style={{ paddingLeft: 8 + depth * 12 }}
         >
@@ -253,23 +291,16 @@ function TreeRow({
           {open ? <FolderOpen className="h-3.5 w-3.5 shrink-0 text-koda-accent/70" /> : <Folder className="h-3.5 w-3.5 shrink-0 text-koda-accent/70" />}
           <span className="truncate">{node.name}</span>
         </button>
-        {open &&
-          node.children &&
-          [...node.children.values()].sort(sortNodes).map((c) => (
-            <TreeRow key={c.path} node={c} depth={depth + 1} activePath={activePath} onSelect={onSelect} />
-          ))}
+        {open && node.children && [...node.children.values()].sort(sortNodes).map((c) => (
+          <TreeRow key={c.path} node={c} depth={depth + 1} activePath={activePath} onSelect={onSelect} />
+        ))}
       </>
     );
   }
 
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(node.path)}
-      className={cn(
-        "flex w-full items-center gap-1.5 px-2 py-1 text-left text-[13px] hover:bg-koda-surface-2",
-        active ? "bg-koda-surface-2 text-koda-text" : "text-koda-muted"
-      )}
+    <button type="button" onClick={() => onSelect(node.path)}
+      className={cn("flex w-full items-center gap-1.5 px-2 py-1 text-left text-[13px] hover:bg-koda-surface-2", active ? "bg-koda-surface-2 text-koda-text" : "text-koda-muted")}
       style={{ paddingLeft: 8 + depth * 12 + 12 }}
     >
       <FileIcon className="h-3.5 w-3.5 shrink-0 opacity-70" />
@@ -284,17 +315,12 @@ function CodeView({ file }: { file: ProjectFile }) {
   const html = useMemo(() => {
     const lang = HLJS_LANG[extOf(file.path)];
     try {
-      if (lang && hljs.getLanguage(lang)) {
-        return hljs.highlight(file.content, { language: lang }).value;
-      }
+      if (lang && hljs.getLanguage(lang)) return hljs.highlight(file.content, { language: lang }).value;
       return hljs.highlightAuto(file.content).value;
-    } catch {
-      return escapeHtml(file.content);
-    }
+    } catch { return escapeHtml(file.content); }
   }, [file.path, file.content]);
 
   const lines = file.content.split("\n").length;
-
   return (
     <>
       <div className="flex items-center gap-2 border-b border-koda-border bg-koda-surface/30 px-3 py-1.5 text-xs text-koda-muted">
@@ -315,49 +341,22 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// ─── Small UI bits ────────────────────────────────────────────
+// ─── UI primitives ────────────────────────────────────────────
 
-function TabBtn({
-  active,
-  onClick,
-  icon,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  label: string;
-}) {
+function TabBtn({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-        active ? "bg-koda-accent/20 text-koda-accent-soft" : "text-koda-muted hover:text-koda-text"
-      )}
+    <button type="button" onClick={onClick}
+      className={cn("inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+        active ? "bg-koda-accent/20 text-koda-accent-soft" : "text-koda-muted hover:text-koda-text")}
     >
-      {icon}
-      {label}
+      {icon}{label}
     </button>
   );
 }
 
-function IconBtn({
-  onClick,
-  title,
-  children,
-}: {
-  onClick: () => void;
-  title: string;
-  children: React.ReactNode;
-}) {
+function IconBtn({ onClick, title, children }: { onClick: () => void; title: string; children: React.ReactNode }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      aria-label={title}
+    <button type="button" onClick={onClick} title={title} aria-label={title}
       className="flex h-7 w-7 items-center justify-center rounded-lg text-koda-muted transition-colors hover:bg-koda-surface-2 hover:text-koda-text"
     >
       {children}
@@ -366,30 +365,27 @@ function IconBtn({
 }
 
 const STATUS_LABEL: Record<ComputerStatus, string> = {
-  building: "Building",
-  installing: "Installing",
-  running: "Starting dev server",
-  ready: "Live",
-  error: "Error",
+  building: "Building", installing: "Installing", running: "Starting", ready: "Live", error: "Error",
 };
 
-function StatusPill({ status }: { status: ComputerStatus }) {
+function StatusPill({ status, isReal }: { status: ComputerStatus; isReal: boolean }) {
   const busy = status === "building" || status === "installing" || status === "running";
   return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium",
-        status === "ready" && "bg-emerald-500/15 text-emerald-300",
-        status === "error" && "bg-red-500/15 text-red-300",
-        busy && "bg-koda-accent/15 text-koda-accent-soft"
-      )}
-    >
-      {busy ? (
-        <Loader2 className="h-3 w-3 animate-spin" />
-      ) : (
+    <span className={cn(
+      "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium",
+      status === "ready" && "bg-emerald-500/15 text-emerald-300",
+      status === "error" && "bg-red-500/15 text-red-300",
+      busy && "bg-koda-accent/15 text-koda-accent-soft"
+    )}>
+      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : (
         <span className={cn("h-1.5 w-1.5 rounded-full", status === "ready" ? "bg-emerald-400" : "bg-red-400")} />
       )}
       {STATUS_LABEL[status]}
+      {isReal && status === "ready" && (
+        <span className="ml-0.5 flex items-center gap-0.5 text-[10px] text-emerald-400/70">
+          <Zap className="h-2.5 w-2.5" />real
+        </span>
+      )}
     </span>
   );
 }

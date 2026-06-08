@@ -12,6 +12,70 @@ import {
 } from "@/lib/prompts";
 import type { Source, SwarmAgentRun, SwarmAgentRole, SwarmStreamEvent } from "@/types";
 
+// ── Computer Swarm specialists ────────────────────────────────
+// When the user asks to BUILD something, these agents divide up the codebase:
+// Architect writes project config, UI Dev writes components, Stylist writes CSS.
+// The Synthesizer merges all <koda-file> outputs into one [[computer:]] directive.
+
+interface ComputerSpecialistDef {
+  role: Exclude<SwarmAgentRole, "synthesizer">;
+  label: string;
+  systemPrompt: (query: string) => string;
+}
+
+const COMPUTER_SPECIALISTS: ComputerSpecialistDef[] = [
+  {
+    role: "researcher",
+    label: "Architect",
+    systemPrompt: (q) =>
+      `You are the Architect in a KodaAI Computer Swarm building: "${q}"\n` +
+      "Your job: write ONLY the project skeleton files.\n" +
+      "Output EXACTLY these files using <koda-file path=\"...\">...</koda-file> tags:\n" +
+      "  • package.json (with name, version, scripts, dependencies — react + react-dom + vite)\n" +
+      "  • vite.config.js\n" +
+      "  • index.html (Vite entry, loads /src/main.jsx)\n" +
+      "  • src/main.jsx (ReactDOM.createRoot → <App />)\n" +
+      "Output ONLY the raw file blocks — no prose, no explanation, no fences.",
+  },
+  {
+    role: "analyst",
+    label: "UI Developer",
+    systemPrompt: (q) =>
+      `You are the UI Developer in a KodaAI Computer Swarm building: "${q}"\n` +
+      "Your job: write ONLY the main React component(s).\n" +
+      "Output ONLY <koda-file path=\"src/App.jsx\">...</koda-file> " +
+      "(and any additional src/components/*.jsx files if needed).\n" +
+      "The component should be complete, functional, and well-structured.\n" +
+      "Import styles from './index.css'. Use React hooks as needed.\n" +
+      "Output ONLY the raw file blocks — no prose, no markdown fences.",
+  },
+  {
+    role: "critic",
+    label: "Stylist",
+    systemPrompt: (q) =>
+      `You are the Stylist in a KodaAI Computer Swarm building: "${q}"\n` +
+      "Your job: write ONLY the CSS styling.\n" +
+      "Output ONLY <koda-file path=\"src/index.css\">...</koda-file> " +
+      "(and optionally src/App.css).\n" +
+      "Make it beautiful: modern design, good typography, responsive layout, " +
+      "attractive color palette, hover states, smooth transitions.\n" +
+      "Output ONLY the raw file blocks — no prose, no markdown fences.",
+  },
+];
+
+const COMPUTER_SYNTH_SYSTEM =
+  "You are the Integrator in a KodaAI Computer Swarm. " +
+  "Three specialists — an Architect, a UI Developer, and a Stylist — have each written " +
+  "their portion of a React/Vite project as <koda-file> blocks. " +
+  "Your job: merge ALL their files into one complete, working project.\n" +
+  "Rules:\n" +
+  "1. Emit `[[computer:Project Title]]` as the VERY FIRST characters.\n" +
+  "2. Output every file from all three specialists using <koda-file path=\"...\">...</koda-file> tags. " +
+  "If files overlap, use the most complete version (prefer UI Dev's App.jsx over Architect's).\n" +
+  "3. After the files, emit: <koda-cmd>npm install</koda-cmd><koda-cmd>npm run dev</koda-cmd>\n" +
+  "4. End with 1-2 short sentences describing what was built.\n" +
+  "Never show, mention, or explain the directive or koda tags.";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -106,34 +170,42 @@ export async function POST(req: Request) {
     );
   }
 
-  let body: { query?: string; model?: string; targetUrl?: string; images?: string[] };
+  let body: { query?: string; model?: string; targetUrl?: string; images?: string[]; computerSwarm?: boolean };
   try {
     body = await req.json();
   } catch {
     return new Response("Invalid body.", { status: 400 });
   }
 
-  const { query, model = DEFAULT_MODEL, targetUrl, images = [] } = body;
+  const { query, model = DEFAULT_MODEL, targetUrl, images = [], computerSwarm = false } = body;
   if (!query?.trim()) {
     return new Response("Missing query.", { status: 400 });
   }
-  // Images are only attached to specialists' user turns (the synthesizer works
-  // from their text reports). Ignored by text-only models.
   const imagePayload = Array.isArray(images) && images.length ? images : undefined;
 
-  // specialists = swarmAgents cap - 1 (synthesizer always occupies the last slot)
+  // Computer swarm: code-writing specialists (Architect, UI Dev, Stylist).
+  // Research swarm: research specialists (Researcher, Reasoner, Media Scout).
   const specialistCount = Math.min(caps.swarmAgents - 1, SPECIALISTS.length);
-  const specialists = SPECIALISTS.slice(0, specialistCount);
 
-  const agentList: SwarmAgentRun[] = [
-    ...specialists.map((s) => ({
-      id: uid(),
-      role: s.role as SwarmAgentRole,
-      label: s.label,
-      status: "pending" as const,
-    })),
-    { id: uid(), role: "synthesizer" as const, label: "Synthesizer", status: "pending" as const },
-  ];
+  const agentList: SwarmAgentRun[] = computerSwarm
+    ? [
+        ...COMPUTER_SPECIALISTS.map((s) => ({
+          id: uid(),
+          role: s.role as SwarmAgentRole,
+          label: s.label,
+          status: "pending" as const,
+        })),
+        { id: uid(), role: "synthesizer" as const, label: "Integrator", status: "pending" as const },
+      ]
+    : [
+        ...SPECIALISTS.slice(0, specialistCount).map((s) => ({
+          id: uid(),
+          role: s.role as SwarmAgentRole,
+          label: s.label,
+          status: "pending" as const,
+        })),
+        { id: uid(), role: "synthesizer" as const, label: "Synthesizer", status: "pending" as const },
+      ];
 
   const encoder = new TextEncoder();
 
@@ -142,91 +214,134 @@ export async function POST(req: Request) {
       const push = (evt: SwarmStreamEvent) => {
         try {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(evt)}\n\n`));
-        } catch {
-          /* stream closed */
-        }
+        } catch { /* stream closed */ }
       };
 
       push({ type: "init", agents: agentList });
 
-      // Shared sources when a URL is provided (all agents read the same page)
-      let sharedSources: Source[] = [];
-      if (targetUrl) {
-        sharedSources = await scrapeUrls([targetUrl]).catch(() => []);
-      }
-
-      // Run all specialists in parallel
       const reports: { label: string; output: string }[] = [];
 
-      await Promise.allSettled(
-        specialists.map(async (spec, i) => {
-          const agent = agentList[i];
-          push({ type: "agent_update", agentId: agent.id, status: "thinking" });
-
-          try {
-            let sources: Source[] = sharedSources;
-            let sourceCount = sources.length;
-
-            if (!targetUrl) {
-              const results = await searchWeb(spec.searchQuery(query), 3).catch(() => []);
-              const missingUrls = results.filter((r) => !r.content).map((r) => r.url);
-              const scraped = missingUrls.length ? await scrapeUrls(missingUrls).catch(() => []) : [];
-              const byUrl = new Map(scraped.map((s) => [s.url, s]));
-              sources = results.map((r) => ({
-                url: r.url,
-                title: r.title,
-                content: r.content || byUrl.get(r.url)?.content || r.snippet || "",
-                snippet: r.snippet,
-              }));
-              sourceCount = sources.length;
+      if (computerSwarm) {
+        // ── Computer Swarm: specialists write code files in parallel ──
+        await Promise.allSettled(
+          COMPUTER_SPECIALISTS.map(async (spec, i) => {
+            const agent = agentList[i];
+            push({ type: "agent_update", agentId: agent.id, status: "thinking" });
+            try {
+              let output = "";
+              for await (const token of chatStream({
+                model,
+                messages: [
+                  { role: "system", content: spec.systemPrompt(query) },
+                  { role: "user", content: `Build this project: ${query}` },
+                ],
+                options: { temperature: 0.2 },
+              })) {
+                output += token;
+                push({ type: "specialist_token", agentId: agent.id, content: token });
+              }
+              reports.push({ label: spec.label, output });
+              const fileCount = (output.match(/<koda-file/g) || []).length;
+              push({ type: "agent_update", agentId: agent.id, status: "done", output, sourceCount: fileCount });
+            } catch {
+              push({ type: "agent_update", agentId: agent.id, status: "error" });
             }
+          })
+        );
 
-            let output = "";
-            for await (const token of chatStream({
-              model,
-              messages: [
-                { role: "system", content: spec.systemPrompt },
-                {
-                  role: "user",
-                  content: agentUserMsg(query, sources),
-                  ...(imagePayload ? { images: imagePayload } : {}),
-                },
-              ],
-              options: { temperature: 0.3 },
-            })) {
-              output += token;
-              push({ type: "specialist_token", agentId: agent.id, content: token });
-            }
-
-            reports.push({ label: spec.label, output });
-            push({ type: "agent_update", agentId: agent.id, status: "done", output, sourceCount });
-          } catch {
-            push({ type: "agent_update", agentId: agent.id, status: "error" });
+        // Integrator: merge all files into a single [[computer:]] directive
+        const synthAgent = agentList[agentList.length - 1];
+        push({ type: "agent_update", agentId: synthAgent.id, status: "thinking" });
+        const integratorMsg =
+          `Project: "${query}"\n\n` +
+          reports.map((r) => `=== ${r.label} ===\n${r.output}`).join("\n\n") +
+          `\n\nMerge all the above <koda-file> blocks into one complete [[computer:${query.slice(0, 40)}]] project. Output the directive + all files + commands.`;
+        try {
+          for await (const token of chatStream({
+            model,
+            messages: [
+              { role: "system", content: COMPUTER_SYNTH_SYSTEM },
+              { role: "user", content: integratorMsg },
+            ],
+          })) {
+            push({ type: "synthesis_token", content: token });
           }
-        })
-      );
-
-      // Synthesizer runs after all specialists complete. Swarm is Pro/Max, so it
-      // can also build artifacts (Koda's Computer, websites, slides, spreadsheets)
-      // when the user asked to BUILD/CREATE something rather than just research.
-      const synthAgent = agentList[agentList.length - 1];
-      push({ type: "agent_update", agentId: synthAgent.id, status: "thinking" });
-
-      const synthSystem = `${SYNTH_SYSTEM}\n\n${COMPUTER_INSTRUCTIONS}\n\n${WEBSITE_INSTRUCTIONS}\n\n${slidesInstructions(caps.slidesMax)}\n\n${SHEETS_INSTRUCTIONS}`;
-
-      try {
-        for await (const token of chatStream({
-          model,
-          messages: [
-            { role: "system", content: synthSystem },
-            { role: "user", content: synthUserMsg(query, reports) },
-          ],
-        })) {
-          push({ type: "synthesis_token", content: token });
+          push({ type: "agent_update", agentId: synthAgent.id, status: "done" });
+        } catch {
+          push({ type: "agent_update", agentId: synthAgent.id, status: "error" });
         }
-        push({ type: "agent_update", agentId: synthAgent.id, status: "done" });
-      } catch {
-        push({ type: "agent_update", agentId: synthAgent.id, status: "error" });
+      } else {
+        // ── Research Swarm: original parallel research + synthesis ──
+        const specialists = SPECIALISTS.slice(0, specialistCount);
+
+        let sharedSources: Source[] = [];
+        if (targetUrl) sharedSources = await scrapeUrls([targetUrl]).catch(() => []);
+
+        await Promise.allSettled(
+          specialists.map(async (spec, i) => {
+            const agent = agentList[i];
+            push({ type: "agent_update", agentId: agent.id, status: "thinking" });
+
+            try {
+              let sources: Source[] = sharedSources;
+              let sourceCount = sources.length;
+
+              if (!targetUrl) {
+                const results = await searchWeb(spec.searchQuery(query), 3).catch(() => []);
+                const missingUrls = results.filter((r) => !r.content).map((r) => r.url);
+                const scraped = missingUrls.length ? await scrapeUrls(missingUrls).catch(() => []) : [];
+                const byUrl = new Map(scraped.map((s) => [s.url, s]));
+                sources = results.map((r) => ({
+                  url: r.url,
+                  title: r.title,
+                  content: r.content || byUrl.get(r.url)?.content || r.snippet || "",
+                  snippet: r.snippet,
+                }));
+                sourceCount = sources.length;
+              }
+
+              let output = "";
+              for await (const token of chatStream({
+                model,
+                messages: [
+                  { role: "system", content: spec.systemPrompt },
+                  {
+                    role: "user",
+                    content: agentUserMsg(query, sources),
+                    ...(imagePayload ? { images: imagePayload } : {}),
+                  },
+                ],
+                options: { temperature: 0.3 },
+              })) {
+                output += token;
+                push({ type: "specialist_token", agentId: agent.id, content: token });
+              }
+
+              reports.push({ label: spec.label, output });
+              push({ type: "agent_update", agentId: agent.id, status: "done", output, sourceCount });
+            } catch {
+              push({ type: "agent_update", agentId: agent.id, status: "error" });
+            }
+          })
+        );
+
+        const synthAgent = agentList[agentList.length - 1];
+        push({ type: "agent_update", agentId: synthAgent.id, status: "thinking" });
+        const synthSystem = `${SYNTH_SYSTEM}\n\n${COMPUTER_INSTRUCTIONS}\n\n${WEBSITE_INSTRUCTIONS}\n\n${slidesInstructions(caps.slidesMax)}\n\n${SHEETS_INSTRUCTIONS}`;
+        try {
+          for await (const token of chatStream({
+            model,
+            messages: [
+              { role: "system", content: synthSystem },
+              { role: "user", content: synthUserMsg(query, reports) },
+            ],
+          })) {
+            push({ type: "synthesis_token", content: token });
+          }
+          push({ type: "agent_update", agentId: synthAgent.id, status: "done" });
+        } catch {
+          push({ type: "agent_update", agentId: synthAgent.id, status: "error" });
+        }
       }
 
       push({ type: "done" });

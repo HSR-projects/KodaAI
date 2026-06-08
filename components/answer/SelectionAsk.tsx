@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Quote } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Sparkles, BookOpen, FileText, Languages } from "lucide-react";
 import { useKodaStore } from "@/lib/store";
 
 interface PopState {
@@ -10,21 +11,48 @@ interface PopState {
   y: number;
 }
 
-/**
- * ChatGPT-style "Ask Koda AI" popover. When the user selects text inside the
- * given container, a small floating button appears; clicking it quotes the
- * selection into the composer (via the store's composerDraft).
- */
+const ACTIONS = [
+  {
+    id: "ask",
+    label: "Ask Koda AI",
+    icon: Sparkles,
+    build: (text: string) =>
+      `${text
+        .split("\n")
+        .map((l) => `> ${l}`)
+        .join("\n")}\n\n`,
+    primary: true,
+  },
+  {
+    id: "explain",
+    label: "Explain",
+    icon: BookOpen,
+    build: (text: string) => `Explain this in simple terms:\n\n> ${text.trim()}\n\n`,
+    primary: false,
+  },
+  {
+    id: "summarize",
+    label: "Summarize",
+    icon: FileText,
+    build: (text: string) => `Summarize the key points of:\n\n> ${text.trim()}\n\n`,
+    primary: false,
+  },
+  {
+    id: "translate",
+    label: "Translate",
+    icon: Languages,
+    build: (text: string) => `Translate the following to English:\n\n> ${text.trim()}\n\n`,
+    primary: false,
+  },
+] as const;
+
 export function SelectionAsk({ containerRef }: { containerRef: React.RefObject<HTMLElement> }) {
   const [pop, setPop] = useState<PopState | null>(null);
   const setComposerDraft = useKodaStore((s) => s.setComposerDraft);
-  const popRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Evaluate the current selection and (re)position the popover. Bound to both
-    // mouseup (desktop) and touchend (mobile) so it works with touch selection.
     const evaluate = (target: EventTarget | null) => {
-      // Ignore interactions on the popover itself.
       if (popRef.current && target instanceof Node && popRef.current.contains(target)) return;
 
       const sel = window.getSelection();
@@ -34,7 +62,6 @@ export function SelectionAsk({ containerRef }: { containerRef: React.RefObject<H
         setPop(null);
         return;
       }
-      // Only react to selections that live inside the chat container.
       const anchor = sel.anchorNode;
       if (!anchor || !container.contains(anchor)) {
         setPop(null);
@@ -42,23 +69,16 @@ export function SelectionAsk({ containerRef }: { containerRef: React.RefObject<H
       }
       const range = sel.getRangeAt(0);
       const rect = range.getBoundingClientRect();
-      if (!rect.width && !rect.height) {
-        setPop(null);
-        return;
-      }
-      // Clamp horizontally so the button never spills off a narrow screen.
-      const half = 80; // ~half the popover width incl. margin
+      if (!rect.width && !rect.height) { setPop(null); return; }
+
+      // Clamp horizontally — popover is ~280px wide
+      const half = 140;
       const x = Math.max(half, Math.min(window.innerWidth - half, rect.left + rect.width / 2));
       setPop({ text, x, y: rect.top - 8 });
     };
 
     const onUp = (e: MouseEvent) => evaluate(e.target);
-    // Touch selection finalises slightly after touchend — wait a tick.
-    const onTouchEnd = (e: TouchEvent) => {
-      const t = e.target;
-      setTimeout(() => evaluate(t), 50);
-    };
-
+    const onTouchEnd = (e: TouchEvent) => { const t = e.target; setTimeout(() => evaluate(t), 50); };
     const onDown = (e: Event) => {
       if (popRef.current && e.target instanceof Node && popRef.current.contains(e.target)) return;
       setPop(null);
@@ -77,31 +97,58 @@ export function SelectionAsk({ containerRef }: { containerRef: React.RefObject<H
     };
   }, [containerRef]);
 
-  if (!pop) return null;
-
-  const ask = () => {
-    const quoted = pop.text
-      .split("\n")
-      .map((l) => `> ${l}`)
-      .join("\n");
-    setComposerDraft(`${quoted}\n\n`);
+  const fire = (build: (text: string) => string) => {
+    if (!pop) return;
+    setComposerDraft(build(pop.text));
     setPop(null);
     window.getSelection()?.removeAllRanges();
   };
 
   return (
-    <button
-      ref={popRef}
-      type="button"
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={ask}
-      style={{ left: pop.x, top: pop.y }}
-      className="fixed z-50 -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-full border border-koda-border bg-koda-surface px-3 py-1.5 text-xs font-medium text-koda-text shadow-lg transition-colors hover:bg-koda-surface-2"
-    >
-      <span className="flex items-center gap-1.5">
-        <Quote className="h-3.5 w-3.5 text-koda-accent" />
-        Ask Koda AI
-      </span>
-    </button>
+    <AnimatePresence>
+      {pop && (
+        <motion.div
+          ref={popRef}
+          key="selection-popover"
+          initial={{ opacity: 0, y: 6, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 4, scale: 0.96 }}
+          transition={{ duration: 0.15, ease: "easeOut" }}
+          onMouseDown={(e) => e.preventDefault()}
+          style={{ left: pop.x, top: pop.y }}
+          className="fixed z-50 -translate-x-1/2 -translate-y-full"
+        >
+          {/* Card */}
+          <div className="flex items-center gap-0.5 rounded-xl border border-koda-border bg-koda-surface/95 p-1 shadow-xl shadow-black/40 backdrop-blur-xl">
+            {ACTIONS.map((action, i) => {
+              const Icon = action.icon;
+              return (
+                <button
+                  key={action.id}
+                  type="button"
+                  onClick={() => fire(action.build)}
+                  className={[
+                    "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap",
+                    action.primary
+                      ? "bg-koda-accent/20 text-koda-accent-soft hover:bg-koda-accent/30"
+                      : "text-koda-muted hover:bg-koda-surface-2 hover:text-koda-text",
+                    i < ACTIONS.length - 1 ? "" : "",
+                  ].join(" ")}
+                >
+                  <Icon className="h-3 w-3 shrink-0" />
+                  <span className={action.primary ? "" : "hidden sm:inline"}>{action.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Caret pointing down toward the selection */}
+          <div className="absolute left-1/2 -bottom-1.5 -translate-x-1/2">
+            <div className="h-0 w-0 border-x-[6px] border-t-[6px] border-x-transparent border-t-koda-border" />
+            <div className="absolute left-1/2 -translate-x-1/2 -top-[5px] h-0 w-0 border-x-[5px] border-t-[5px] border-x-transparent border-t-koda-surface/95" />
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }

@@ -51,6 +51,8 @@ interface SendOptions {
   computer?: boolean;
   /** Max slides per deck for this plan (Free 20, Pro/Max 70). */
   slidesMax?: number;
+  /** Use Computer Swarm: parallel Architect/UI Dev/Stylist agents (Pro/Max). */
+  computerSwarm?: boolean;
 }
 
 /**
@@ -200,6 +202,8 @@ export function useChat(threadId: string | null) {
               model,
               targetUrl: opts.targetUrl || undefined,
               images: swarmBuilt.images.length ? swarmBuilt.images : undefined,
+              // Auto-enable computer swarm when swarm + computer plan + build-intent query
+              computerSwarm: opts.computerSwarm ?? (opts.computer ? detectBuildIntent(query) : false),
             }),
             signal: controller.signal,
           });
@@ -870,6 +874,14 @@ async function runComputerTerminal(files: ProjectFile[], commands: string[]) {
 
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || "project";
+}
+
+/** True when the query is clearly asking to BUILD/CREATE a software project. */
+function detectBuildIntent(query: string): boolean {
+  const s = query.toLowerCase();
+  const buildVerbs = /\b(build|create|make|code|develop|write|generate|scaffold)\b/;
+  const appNouns = /\b(app|application|website|web app|dashboard|game|tool|component|ui|frontend|react|vite)\b/;
+  return buildVerbs.test(s) && appNouns.test(s);
 }
 
 /**
