@@ -121,6 +121,7 @@ export function SearchBar({
   const [attachError, setAttachError] = useState<string | null>(null);
   const [listening, setListening] = useState(false);
   const [dictateSupported, setDictateSupported] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const urlRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -247,11 +248,37 @@ export function SearchBar({
   };
 
   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []);
+    // items is more reliable than files for pasted screenshots/images
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const files = items
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => f !== null);
     if (files.length) {
       e.preventDefault();
       void addFiles(files);
     }
+  };
+
+  const onDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault();
+      setDragging(true);
+    }
+  };
+
+  const onDragLeave = (e: React.DragEvent) => {
+    // Only clear if leaving the container entirely
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setDragging(false);
+    }
+  };
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length) void addFiles(files);
   };
 
   const commitUrl = () => {
@@ -283,7 +310,22 @@ export function SearchBar({
 
   return (
     <div className={cn("flex flex-col gap-3", className)}>
-      <div className="group relative flex flex-col gap-2 rounded-2xl border border-koda-border bg-koda-surface px-4 py-3 transition-shadow focus-within:border-koda-accent/50 focus-within:shadow-glow">
+      <div
+        className={cn(
+          "group relative flex flex-col gap-2 rounded-2xl border bg-koda-surface px-4 py-3 transition-shadow focus-within:border-koda-accent/50 focus-within:shadow-glow",
+          dragging ? "border-koda-accent shadow-glow" : "border-koda-border"
+        )}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        {/* Drag-over overlay */}
+        {dragging && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-1.5 rounded-2xl bg-koda-accent/10 backdrop-blur-sm">
+            <Paperclip className="h-6 w-6 text-koda-accent" />
+            <span className="text-sm font-medium text-koda-accent">Drop to attach</span>
+          </div>
+        )}
         {/* Attachment previews */}
         {(attachments.length > 0 || attachLoading) && (
           <div className="flex flex-wrap gap-2">
